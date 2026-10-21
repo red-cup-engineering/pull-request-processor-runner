@@ -1,0 +1,84 @@
+# Runs the released deterministic pull-request processor on GitHub-hosted runners.
+# No Group machine (laptop, cold-red-gate) is involved. This repository is PUBLIC so the
+# runner minutes are free; it holds no source, only this schedule. The processor is
+# `process-github-pull-requests` from @red-cup-engineering/github-repository-hosting-service
+# (source: red-cup-engineering/github-engineering-services-section, scripts/process-pull-requests.mjs).
+#
+# Secret PR_PROCESSOR_TOKEN (repository secret) must read and label pull requests in
+# 561-group, red-cup-engineering, coesite-operations, causeway-services, lenticule-science
+# and the emsenn user. Until it exists the run reports a warning and does nothing.
+#
+# Act classes default to --label only. Widen with the repository variable PR_PROCESSOR_ACTS
+# (e.g. "--label --comment"); no code change needed.
+name: process pull requests
+
+on:
+  schedule:
+    - cron: '7,37 * * * *'
+  workflow_dispatch:
+    inputs:
+      acts:
+        description: Act class flags (blank = repository variable PR_PROCESSOR_ACTS, else --label)
+        type: string
+        default: ''
+      max-acts:
+        description: Upper bound on acts this run
+        type: string
+        default: '100'
+      dry-run:
+        description: Plan only, execute nothing
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: process-pull-requests
+  cancel-in-progress: false
+
+jobs:
+  process:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PROCESSOR_PACKAGE: '@red-cup-engineering/github-repository-hosting-service'
+      PROCESSOR_REGISTRY: https://registry.561.group/
+      GITHUB_TOKEN: ${{ secrets.PR_PROCESSOR_TOKEN }}
+      ACTS: ${{ inputs.acts || vars.PR_PROCESSOR_ACTS || '--label' }}
+      MAX_ACTS: ${{ inputs.max-acts || '100' }}
+      DRY_RUN: ${{ inputs.dry-run && 'true' || 'false' }}
+    steps:
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: '24'
+      - name: Check the credential is present
+        id: credential
+        run: |
+          if [ -z "${GITHUB_TOKEN}" ]; then
+            echo "::warning::PR_PROCESSOR_TOKEN is not set; nothing processed. See the header of this workflow for the permissions it needs."
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Fetch the released processor (no dependencies to install)
+        if: steps.credential.outputs.present == 'true'
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          tarball="$(npm pack "$PROCESSOR_PACKAGE@latest" --registry "$PROCESSOR_REGISTRY" --silent --ignore-scripts)"
+          mkdir processor && tar -xzf "$tarball" -C processor
+          node -e 'console.log("processor", require("./processor/package/package.json").version)'
+      - name: Process pull requests
+        if: steps.credential.outputs.present == 'true'
+        run: |
+          set -euo pipefail
+          plan="$RUNNER_TEMP/plan.json"
+          if [ "$DRY_RUN" = "true" ]; then mode=""; else mode="--apply $ACTS --max-acts $MAX_ACTS"; fi
+          # shellcheck disable=SC2086
+          node "$RUNNER_TEMP/processor/package/scripts/process-pull-requests.mjs" $mode --plan-out "$plan"
+          {
+            echo '### Pull-request processor'
+            echo '```json'
+            node -e 'const p=require(process.argv[1]); console.log(JSON.stringify({dryRun:p.dryRun,open:p.summary.open,byDisposition:p.summary.byDisposition,applied:p.summary.appliedByStatus??null,requests:p.requests},null,2))' "$plan"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
