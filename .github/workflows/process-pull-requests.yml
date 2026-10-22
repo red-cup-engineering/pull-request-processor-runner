@@ -83,9 +83,7 @@ jobs:
           if [ "$DRY_RUN" = "true" ]; then mode=""; else mode="--apply $ACTS --max-acts $MAX_ACTS"; fi
           # shellcheck disable=SC2086
           node "$RUNNER_TEMP/processor/package/scripts/process-pull-requests.mjs" --org "$ORG" $mode --plan-out "$plan"
-          {
-            echo "### Pull-request processor: $ORG"
-            echo '```json'
-            node -e 'const p=require(process.argv[1]); console.log(JSON.stringify({dryRun:p.dryRun,open:p.summary.open,byDisposition:p.summary.byDisposition,applied:p.summary.appliedByStatus??null,requests:p.requests},null,2))' "$plan"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+          # Counts only: this repository's logs are public and many processed repositories are private.
+          counts="$(node -e 'const p=require(process.argv[1]); console.log(JSON.stringify({org:process.env.ORG,dryRun:p.dryRun,open:p.summary.open,byDisposition:p.summary.byDisposition,applied:p.summary.appliedByStatus??null,requests:p.requests}))' "$plan")"
+          echo "$counts"
+          { echo "### Pull-request processor: $ORG"; echo '```json'; echo "$counts"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
