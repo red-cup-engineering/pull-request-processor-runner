@@ -4,12 +4,15 @@
 # `process-github-pull-requests` from @red-cup-engineering/github-repository-hosting-service
 # (source: red-cup-engineering/github-engineering-services-section, scripts/process-pull-requests.mjs).
 #
-# Secret PR_PROCESSOR_TOKEN (repository secret) must read and label pull requests in
-# 561-group, red-cup-engineering, coesite-operations, causeway-services, lenticule-science
-# and the emsenn user. Until it exists the run reports a warning and does nothing.
+# Credential: the Group's existing GitHub App, 561-group-github-services (installed on every org
+# below with all repositories). Each org's job mints its own short-lived installation token,
+# narrowed to what the processor uses: pull requests (labels, comments), contents read (workflow
+# files, compare, the check rollup's state) and statuses read. Repository variable
+# PR_PROCESSOR_APP_ID holds the App ID; repository secret PR_PROCESSOR_APP_KEY its private key.
 #
 # Act classes default to --label only. Widen with the repository variable PR_PROCESSOR_ACTS
-# (e.g. "--label --comment"); no code change needed.
+# (e.g. "--label --comment"); no code change needed. update-branch and merge also need the
+# contents permission below raised to write.
 name: process pull requests
 
 on:
@@ -22,7 +25,7 @@ on:
         type: string
         default: ''
       max-acts:
-        description: Upper bound on acts this run
+        description: Upper bound on acts per org this run
         type: string
         default: '100'
       dry-run:
@@ -32,52 +35,56 @@ on:
 
 permissions: {}
 
-concurrency:
-  group: process-pull-requests
-  cancel-in-progress: false
-
 jobs:
   process:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        org: [561-group, red-cup-engineering, coesite-operations, causeway-services, lenticule-science]
+    concurrency:
+      group: process-pull-requests-${{ matrix.org }}
+      cancel-in-progress: false
     env:
       PROCESSOR_PACKAGE: '@red-cup-engineering/github-repository-hosting-service'
       PROCESSOR_REGISTRY: https://registry.561.group/
-      GITHUB_TOKEN: ${{ secrets.PR_PROCESSOR_TOKEN }}
       ACTS: ${{ inputs.acts || vars.PR_PROCESSOR_ACTS || '--label' }}
       MAX_ACTS: ${{ inputs.max-acts || '100' }}
       DRY_RUN: ${{ inputs.dry-run && 'true' || 'false' }}
     steps:
+      - name: Mint this org's installation token from the Group App
+        id: app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.PR_PROCESSOR_APP_ID }}
+          private-key: ${{ secrets.PR_PROCESSOR_APP_KEY }}
+          owner: ${{ matrix.org }}
+          permission-pull-requests: write
+          permission-contents: read
+          permission-statuses: read
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
         with:
           node-version: '24'
-      - name: Check the credential is present
-        id: credential
-        run: |
-          if [ -z "${GITHUB_TOKEN}" ]; then
-            echo "::warning::PR_PROCESSOR_TOKEN is not set; nothing processed. See the header of this workflow for the permissions it needs."
-            echo "present=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          fi
       - name: Fetch the released processor (no dependencies to install)
-        if: steps.credential.outputs.present == 'true'
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP"
           tarball="$(npm pack "$PROCESSOR_PACKAGE@latest" --registry "$PROCESSOR_REGISTRY" --silent --ignore-scripts)"
           mkdir processor && tar -xzf "$tarball" -C processor
           node -e 'console.log("processor", require("./processor/package/package.json").version)'
-      - name: Process pull requests
-        if: steps.credential.outputs.present == 'true'
+      - name: Process ${{ matrix.org }} pull requests
+        env:
+          GITHUB_TOKEN: ${{ steps.app.outputs.token }}
+          ORG: ${{ matrix.org }}
         run: |
           set -euo pipefail
           plan="$RUNNER_TEMP/plan.json"
           if [ "$DRY_RUN" = "true" ]; then mode=""; else mode="--apply $ACTS --max-acts $MAX_ACTS"; fi
           # shellcheck disable=SC2086
-          node "$RUNNER_TEMP/processor/package/scripts/process-pull-requests.mjs" $mode --plan-out "$plan"
+          node "$RUNNER_TEMP/processor/package/scripts/process-pull-requests.mjs" --org "$ORG" $mode --plan-out "$plan"
           {
-            echo '### Pull-request processor'
+            echo "### Pull-request processor: $ORG"
             echo '```json'
             node -e 'const p=require(process.argv[1]); console.log(JSON.stringify({dryRun:p.dryRun,open:p.summary.open,byDisposition:p.summary.byDisposition,applied:p.summary.appliedByStatus??null,requests:p.requests},null,2))' "$plan"
             echo '```'
