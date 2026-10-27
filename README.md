@@ -7,11 +7,13 @@
 [![Tips welcome](https://img.shields.io/badge/tips-welcome-d4a017)](https://github.com/561-group/.github/blob/main/TIPS.md)
 <!-- 561-group-standards:badges:end -->
 
-Runs the released deterministic pull request processor twice an hour on the
+Runs the released deterministic pull request processor explicitly on demand on the
 existing five-organization matrix. The existing GitHub App supplies a separate
 short-lived installation token for each organization. Act selection, limits,
 permissions and manual dry-run behavior are defined by
 [the workflow](.github/workflows/process-pull-requests.yml).
+
+See [causal-pr-processor-invocation.md](specifications/causal-pr-processor-invocation.md) for governance on clock retirement; unattended causal binding remains unreceived.
 
 ## Selected processor release
 
