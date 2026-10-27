@@ -72,8 +72,17 @@ jobs:
           cd "$RUNNER_TEMP"
           tarball="$(npm pack "$PROCESSOR_PACKAGE@latest" --registry "$PROCESSOR_REGISTRY" --silent --ignore-scripts)"
           mkdir processor && tar -xzf "$tarball" -C processor
-          node -e 'console.log("processor", require("./processor/package/package.json").version)'
+          node - "$tarball" <<'NODE'
+          const fs = require('node:fs'), crypto = require('node:crypto');
+          const pkg = JSON.parse(fs.readFileSync('./processor/package/package.json', 'utf8'));
+          const version = typeof pkg.version === 'string' && /^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(pkg.version) ? pkg.version : null;
+          const source = { name: process.env.PROCESSOR_PACKAGE, version,
+            tarballSha256: crypto.createHash('sha256').update(fs.readFileSync(process.argv[2])).digest('hex') };
+          fs.writeFileSync('processor-source.json', JSON.stringify(source) + '\n');
+          console.log('processor', version);
+          NODE
       - name: Process ${{ matrix.org }} pull requests
+        id: process
         env:
           GITHUB_TOKEN: ${{ steps.app.outputs.token }}
           ORG: ${{ matrix.org }}
@@ -81,9 +90,73 @@ jobs:
           set -euo pipefail
           plan="$RUNNER_TEMP/plan.json"
           if [ "$DRY_RUN" = "true" ]; then mode=""; else mode="--apply $ACTS --max-acts $MAX_ACTS"; fi
+          status=0
           # shellcheck disable=SC2086
-          node "$RUNNER_TEMP/processor/package/scripts/process-pull-requests.mjs" --org "$ORG" $mode --plan-out "$plan"
-          # Counts only: this repository's logs are public and many processed repositories are private.
-          counts="$(node -e 'const p=require(process.argv[1]); console.log(JSON.stringify({org:process.env.ORG,dryRun:p.dryRun,open:p.summary.open,byDisposition:p.summary.byDisposition,applied:p.summary.appliedByStatus??null,requests:p.requests}))' "$plan")"
-          echo "$counts"
-          { echo "### Pull-request processor: $ORG"; echo '```json'; echo "$counts"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          node "$RUNNER_TEMP/processor/package/scripts/process-pull-requests.mjs" --org "$ORG" $mode --plan-out "$plan" > "$RUNNER_TEMP/processor-private-output.log" 2>&1 || status=$?
+          printf '%s\n' "$status" > "$RUNNER_TEMP/processor-exit-code"
+          exit "$status"
+      - name: Receive public run evidence without private Work contents
+        id: receipt
+        if: ${{ always() }}
+        env:
+          ORG: ${{ matrix.org }}
+          PROCESS_OUTCOME: ${{ steps.process.outcome }}
+        run: |
+          set -euo pipefail
+          # Both the raw plan and raw output can name private repositories and PRs.
+          # Publish a field allowlist only; never upload either original file.
+          node <<'NODE'
+          const fs = require('node:fs'), path = require('node:path');
+          const file = name => path.join(process.env.RUNNER_TEMP, name);
+          const read = name => { try { return { state: 'read', value: JSON.parse(fs.readFileSync(file(name), 'utf8')) }; }
+            catch (error) { return { state: error.code === 'ENOENT' ? 'missing' : 'unreadable', value: null }; } };
+          const integer = value => Number.isSafeInteger(value) && value >= 0 ? value : null;
+          const match = (value, pattern) => typeof value === 'string' && pattern.test(value) ? value : null;
+          const counts = (value, names) => Object.fromEntries(names.filter(name => integer(value?.[name]) !== null).map(name => [name, value[name]]));
+          const observed = read('plan.json'), source = read('processor-source.json').value;
+          const recognized = ['github.pull-request-plan.v1', 'github.pull-request-observation.v1'].includes(observed.value?.kind);
+          const p = recognized ? observed.value : null;
+          const owners = Array.isArray(p?.coverage?.owners) ? p.coverage.owners : [];
+          const reasons = new Set(['partial-graphql-page', 'provider-read-failed', 'malformed-search-page', 'malformed-graphql-errors',
+            'issue-count-changed', 'search-result-limit', 'page-budget-insufficient', 'malformed-pull', 'pull-outside-selected-scope',
+            'duplicate-pull', 'missing-next-cursor', 'cursor-cycle', 'page-limit', 'page-size-exceeded', 'issue-count-mismatch']);
+          const reasonCounts = list => { const out = {}; for (const reason of list) {
+            const code = reasons.has(reason?.code) ? reason.code : 'unrecognized'; out[code] = (out[code] ?? 0) + 1;
+          } return out; };
+          const attempts = owners.flatMap(owner => Array.isArray(owner?.attempts) ? owner.attempts : []);
+          const outcome = ['success', 'failure', 'cancelled', 'skipped'].includes(process.env.PROCESS_OUTCOME) ? process.env.PROCESS_OUTCOME : 'unknown';
+          let exitCode = null;
+          try { const value = fs.readFileSync(file('processor-exit-code'), 'utf8').trim(); if (/^[0-9]{1,3}$/.test(value) && Number(value) <= 255) exitCode = Number(value); } catch {}
+          const runId = match(process.env.GITHUB_RUN_ID, /^[0-9]+$/), attempt = match(process.env.GITHUB_RUN_ATTEMPT, /^[0-9]+$/);
+          const org = ['561-group', 'red-cup-engineering', 'coesite-operations', 'causeway-services', 'lenticule-science'].includes(process.env.ORG) ? process.env.ORG : null;
+          const repository = 'red-cup-engineering/pull-request-processor-runner';
+          const receipt = { kind: 'github.pull-request-run-receipt.v1', visibility: 'public-aggregate', generatedAt: new Date().toISOString(),
+            runner: { repository, runId, attempt, headSha: match(process.env.GITHUB_SHA, /^[0-9a-f]{40}$/i), organization: org,
+              runUrl: runId ? `https://github.com/${repository}/actions/runs/${runId}` : null },
+            processor: { name: '@red-cup-engineering/github-repository-hosting-service',
+              version: match(source?.version, /^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/),
+              tarballSha256: match(source?.tarballSha256, /^[0-9a-f]{64}$/i), node: process.version },
+            execution: { outcome, exitCode, dryRun: process.env.DRY_RUN === 'true',
+              receiptState: recognized ? p.kind : observed.state === 'read' ? 'unrecognized' : observed.state },
+            coverage: { complete: typeof p?.coverage?.complete === 'boolean' ? p.coverage.complete : null,
+              selectedScopes: owners.length, attempts: attempts.length,
+              reasons: reasonCounts(owners.flatMap(owner => Array.isArray(owner?.reasons) ? owner.reasons : [])),
+              attemptReasons: reasonCounts(attempts.flatMap(item => Array.isArray(item?.reasons) ? item.reasons : [])) },
+            counts: { open: integer(p?.summary?.open), observedPulls: integer(p?.observedPulls), requests: integer(p?.requests),
+              byDisposition: counts(p?.summary?.byDisposition, ['superseded', 'dependabot', 'conflicting', 'checks-failing', 'unknown', 'draft-unverified', 'draft-clean', 'no-checks', 'checks-pending', 'ready-clean']),
+              applied: counts(p?.summary?.appliedByStatus, ['applied', 'skipped', 'refused', 'deferred', 'error']) } };
+          const text = JSON.stringify(receipt, null, 2) + '\n';
+          fs.writeFileSync(file('pr-processor-public-receipt.json'), text);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, 'ready=true\n');
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### Pull-request processor: ${org ?? 'unknown'}\n\n\`\`\`json\n${text}\`\`\`\n`);
+          process.stdout.write(text);
+          NODE
+      - name: Retain sanitized processing receipt
+        if: ${{ always() && steps.receipt.outputs.ready == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pr-processor-${{ matrix.org }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pr-processor-public-receipt.json
+          if-no-files-found: error
+          retention-days: 14
+
