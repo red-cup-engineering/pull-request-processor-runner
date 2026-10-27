@@ -13,6 +13,19 @@ short-lived installation token for each organization. Act selection, limits,
 permissions and manual dry-run behavior are defined by
 [the workflow](.github/workflows/process-pull-requests.yml).
 
+## Selected processor release
+
+The workflow pins `@red-cup-engineering/github-repository-hosting-service` to
+`0.3.10-dev.700` from the existing `https://registry.561.group/` registry. That
+release declares source commit `c2b6d67be3f9b717c19367c18fbe97915dd0e65b`, the
+merge of the qualified pull request observation repair. The package name and
+registry remain fixed, and changing the selected release requires an explicit
+workflow version change.
+
+Each run records the version actually acquired and the downloaded tarball
+digest. Its completed run and receipt establish whether this selected release
+was executed; the workflow declaration alone does not establish runtime adoption.
+
 ## Receiving each run
 
 Every job attempts to retain one `github.pull-request-run-receipt.v1` JSON

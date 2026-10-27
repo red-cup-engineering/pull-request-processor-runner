@@ -48,6 +48,7 @@ jobs:
       cancel-in-progress: false
     env:
       PROCESSOR_PACKAGE: '@red-cup-engineering/github-repository-hosting-service'
+      PROCESSOR_VERSION: '0.3.10-dev.700'
       PROCESSOR_REGISTRY: https://registry.561.group/
       ACTS: ${{ inputs.acts || vars.PR_PROCESSOR_ACTS || '--label' }}
       MAX_ACTS: ${{ inputs.max-acts || '100' }}
@@ -70,7 +71,7 @@ jobs:
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP"
-          tarball="$(npm pack "$PROCESSOR_PACKAGE@latest" --registry "$PROCESSOR_REGISTRY" --silent --ignore-scripts)"
+          tarball="$(npm pack "$PROCESSOR_PACKAGE@$PROCESSOR_VERSION" --registry "$PROCESSOR_REGISTRY" --silent --ignore-scripts)"
           mkdir processor && tar -xzf "$tarball" -C processor
           node - "$tarball" <<'NODE'
           const fs = require('node:fs'), crypto = require('node:crypto');
