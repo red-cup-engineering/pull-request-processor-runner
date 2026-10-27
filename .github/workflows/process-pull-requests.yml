@@ -1,6 +1,6 @@
 # Runs the released deterministic pull-request processor on GitHub-hosted runners.
 # No Group machine (laptop, cold-red-gate) is involved. This repository is PUBLIC so the
-# runner minutes are free; it holds no source, only this schedule. The processor is
+# runner minutes are free; it holds no source, only this explicit workflow. The processor is
 # `process-github-pull-requests` from @red-cup-engineering/github-repository-hosting-service
 # (source: red-cup-engineering/github-engineering-services-section, scripts/process-pull-requests.mjs).
 #
@@ -16,8 +16,6 @@
 name: process pull requests
 
 on:
-  schedule:
-    - cron: '7,37 * * * *'
   workflow_dispatch:
     inputs:
       acts:
