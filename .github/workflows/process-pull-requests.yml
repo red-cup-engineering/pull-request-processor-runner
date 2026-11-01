@@ -60,7 +60,7 @@ jobs:
       # The processor runs from its source at one pinned commit of the GitHub section (pure Node, no dependencies), so
       # a merged fix reaches the runner by changing this line, without waiting for a registry release.
       PROCESSOR_SOURCE: red-cup-engineering/github-engineering-services-section
-      PROCESSOR_COMMIT: '830f6205160f35a519ea36c0e9e32476133eadce'
+      PROCESSOR_COMMIT: 'e38b3b362de1fbae20d1816bda7af888e95c0e06'
       ACTS: ${{ inputs.acts || vars.PR_PROCESSOR_ACTS || '--label' }}
       MAX_ACTS: ${{ inputs.max-acts || '100' }}
       DRY_RUN: ${{ inputs.dry-run && 'true' || 'false' }}
@@ -198,7 +198,7 @@ jobs:
       cancel-in-progress: false
     env:
       PROCESSOR_SOURCE: red-cup-engineering/github-engineering-services-section
-      PROCESSOR_COMMIT: '830f6205160f35a519ea36c0e9e32476133eadce'
+      PROCESSOR_COMMIT: 'e38b3b362de1fbae20d1816bda7af888e95c0e06'
       ACTS: ${{ inputs.issue-acts || vars.ISSUE_PROCESSOR_ACTS || '--label' }}
       MAX_ACTS: ${{ inputs.max-acts || '100' }}
       DRY_RUN: ${{ inputs.dry-run && 'true' || 'false' }}
