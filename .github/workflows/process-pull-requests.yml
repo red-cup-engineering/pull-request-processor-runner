@@ -44,7 +44,7 @@ permissions: {}
 jobs:
   process:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -150,7 +150,7 @@ jobs:
           const receipt = { kind: 'github.pull-request-run-receipt.v1', visibility: 'public-aggregate', generatedAt: new Date().toISOString(),
             runner: { repository, runId, attempt, headSha: match(process.env.GITHUB_SHA, /^[0-9a-f]{40}$/i), organization: org,
               runUrl: runId ? `https://github.com/${repository}/actions/runs/${runId}` : null },
-            processor: { name: '@red-cup-engineering/github-repository-hosting-service',
+            processor: { name: match(source?.name, /^[a-z0-9-]+\/[a-z0-9_.-]+$/i), commit: match(source?.commit, /^[0-9a-f]{40}$/i),
               version: match(source?.version, /^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/),
               tarballSha256: match(source?.tarballSha256, /^[0-9a-f]{64}$/i), node: process.version },
             execution: { outcome, exitCode, dryRun: process.env.DRY_RUN === 'true',
