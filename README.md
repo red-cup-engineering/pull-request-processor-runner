@@ -18,11 +18,16 @@ See [causal-pr-processor-invocation.md](specifications/causal-pr-processor-invoc
 ## Selected processor release
 
 The workflow pins `@red-cup-engineering/github-repository-hosting-service` to
-`0.3.10-dev.700` from the existing `https://registry.561.group/` registry. That
-release declares source commit `c2b6d67be3f9b717c19367c18fbe97915dd0e65b`, the
-merge of the qualified pull request observation repair. The package name and
-registry remain fixed, and changing the selected release requires an explicit
-workflow version change.
+`0.5.9` from the existing `https://registry.561.group/` registry. That release
+declares source commit `754fad4757b3003ab56ac627cdc88fc7cdc5c176`
+(red-cup-engineering/github-engineering-services-section#252). It reads every
+organization at one cutoff, oldest first, so pull requests opened during a run
+no longer leave the whole run unplanned, and it judges coverage per
+organization. It also ships `process-issues`, which the `issues` job runs with
+its own act flags (input `issue-acts`, else repository variable
+`ISSUE_PROCESSOR_ACTS`, else `--label`) and reports as counts only. The package
+name and registry remain fixed, and changing the selected release requires an
+explicit workflow version change.
 
 Each run records the version actually acquired and the downloaded tarball
 digest. Its completed run and receipt establish whether this selected release
