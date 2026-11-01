@@ -10,6 +10,10 @@
 # files, compare, the check rollup's state) and statuses read. Repository variable
 # PR_PROCESSOR_APP_ID holds the App ID; repository secret PR_PROCESSOR_APP_KEY its private key.
 #
+# The issues job runs the same release's process-issues (dispositions completed, duplicate, in-progress, stale,
+# open) with its own act flags: input issue-acts, else repository variable ISSUE_PROCESSOR_ACTS, else --label.
+# Its public evidence is counts only, never repository names, issue numbers or titles.
+#
 # Act classes default to --label only. Widen with the repository variable PR_PROCESSOR_ACTS
 # (e.g. "--label --comment"); no code change needed. update-branch and merge also need the
 # contents permission below raised to write.
@@ -26,6 +30,10 @@ on:
         description: Upper bound on acts per org this run
         type: string
         default: '100'
+      issue-acts:
+        description: Issue act class flags (blank = repository variable ISSUE_PROCESSOR_ACTS, else --label)
+        type: string
+        default: ''
       dry-run:
         description: Plan only, execute nothing
         type: boolean
@@ -46,7 +54,7 @@ jobs:
       cancel-in-progress: false
     env:
       PROCESSOR_PACKAGE: '@red-cup-engineering/github-repository-hosting-service'
-      PROCESSOR_VERSION: '0.3.10-dev.700'
+      PROCESSOR_VERSION: '0.5.9'
       PROCESSOR_REGISTRY: https://registry.561.group/
       ACTS: ${{ inputs.acts || vars.PR_PROCESSOR_ACTS || '--label' }}
       MAX_ACTS: ${{ inputs.max-acts || '100' }}
@@ -159,3 +167,75 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  issues:
+    # The Group App (561-group-github-services) holds no Issues permission yet; its owner grants Issues read and write
+    # in the App's settings, each organization approves it, and then repository variable ISSUE_PROCESSOR_ENABLED=true.
+    if: ${{ vars.ISSUE_PROCESSOR_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        org: [561-group, red-cup-engineering, coesite-operations, causeway-services, lenticule-science]
+    concurrency:
+      group: process-issues-${{ matrix.org }}
+      cancel-in-progress: false
+    env:
+      PROCESSOR_PACKAGE: '@red-cup-engineering/github-repository-hosting-service'
+      PROCESSOR_VERSION: '0.5.9'
+      PROCESSOR_REGISTRY: https://registry.561.group/
+      ACTS: ${{ inputs.issue-acts || vars.ISSUE_PROCESSOR_ACTS || '--label' }}
+      MAX_ACTS: ${{ inputs.max-acts || '100' }}
+      DRY_RUN: ${{ inputs.dry-run && 'true' || 'false' }}
+    steps:
+      - name: Mint this org's installation token from the Group App
+        id: app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.PR_PROCESSOR_APP_ID }}
+          private-key: ${{ secrets.PR_PROCESSOR_APP_KEY }}
+          owner: ${{ matrix.org }}
+          permission-issues: write
+          permission-contents: read
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: '24'
+      - name: Fetch the released processor (no dependencies to install)
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          tarball="$(npm pack "$PROCESSOR_PACKAGE@$PROCESSOR_VERSION" --registry "$PROCESSOR_REGISTRY" --silent --ignore-scripts)"
+          mkdir processor && tar -xzf "$tarball" -C processor
+          echo "processor $PROCESSOR_VERSION sha256 $(sha256sum "$tarball" | cut -d' ' -f1)"
+      - name: Process ${{ matrix.org }} issues
+        env:
+          GITHUB_TOKEN: ${{ steps.app.outputs.token }}
+          ORG: ${{ matrix.org }}
+        run: |
+          set -euo pipefail
+          plan="$RUNNER_TEMP/issue-plan.json"
+          if [ "$DRY_RUN" = "true" ]; then mode=""; else mode="--apply $ACTS --max-acts $MAX_ACTS"; fi
+          # shellcheck disable=SC2086
+          node "$RUNNER_TEMP/processor/package/scripts/process-issues.mjs" --org "$ORG" $mode --plan-out "$plan" > "$RUNNER_TEMP/issue-processor-private-output.log" 2>&1
+      - name: Publish counts only
+        if: ${{ always() }}
+        env:
+          ORG: ${{ matrix.org }}
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('node:fs'), path = require('node:path');
+          let p = null; try { p = JSON.parse(fs.readFileSync(path.join(process.env.RUNNER_TEMP, 'issue-plan.json'), 'utf8')); } catch {}
+          const integer = value => Number.isSafeInteger(value) && value >= 0 ? value : null;
+          const counts = (value, names) => Object.fromEntries(names.filter(name => integer(value?.[name]) !== null).map(name => [name, value[name]]));
+          const org = ['561-group', 'red-cup-engineering', 'coesite-operations', 'causeway-services', 'lenticule-science'].includes(process.env.ORG) ? process.env.ORG : null;
+          const receipt = { kind: 'github.issue-run-receipt.v1', visibility: 'public-aggregate', organization: org, dryRun: process.env.DRY_RUN === 'true',
+            planKind: ['github.issue-plan.v1', 'github.issue-observation.v1'].includes(p?.kind) ? p.kind : null,
+            complete: typeof p?.coverage?.complete === 'boolean' ? p.coverage.complete : null,
+            open: integer(p?.summary?.open), requests: integer(p?.requests),
+            byDisposition: counts(p?.summary?.byDisposition, ['completed', 'duplicate', 'in-progress', 'stale', 'open']),
+            applied: counts(p?.summary?.appliedByStatus, ['applied', 'skipped', 'refused', 'deferred', 'error']) };
+          const text = JSON.stringify(receipt, null, 2) + '\n';
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### Issue processor: ${org ?? 'unknown'}\n\n\`\`\`json\n${text}\`\`\`\n`);
+          process.stdout.write(text);
+          NODE
