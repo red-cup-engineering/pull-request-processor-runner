@@ -38,6 +38,10 @@ on:
         description: Plan only, execute nothing
         type: boolean
         default: false
+      generation:
+        description: How many runs in a row this chain has continued (set by the continue job; 0 for a fresh run)
+        type: string
+        default: '0'
 
 permissions: {}
 
@@ -56,7 +60,7 @@ jobs:
       # The processor runs from its source at one pinned commit of the GitHub section (pure Node, no dependencies), so
       # a merged fix reaches the runner by changing this line, without waiting for a registry release.
       PROCESSOR_SOURCE: red-cup-engineering/github-engineering-services-section
-      PROCESSOR_COMMIT: 'd6feba64457828cbf3cbbf70e278a0b778243e75'
+      PROCESSOR_COMMIT: '830f6205160f35a519ea36c0e9e32476133eadce'
       ACTS: ${{ inputs.acts || vars.PR_PROCESSOR_ACTS || '--label' }}
       MAX_ACTS: ${{ inputs.max-acts || '100' }}
       DRY_RUN: ${{ inputs.dry-run && 'true' || 'false' }}
@@ -72,6 +76,8 @@ jobs:
           permission-pull-requests: write
           permission-contents: write
           permission-statuses: read
+          permission-checks: read
+          permission-administration: write
       - name: Mint a read token for the processor's source
         id: source
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
@@ -192,7 +198,7 @@ jobs:
       cancel-in-progress: false
     env:
       PROCESSOR_SOURCE: red-cup-engineering/github-engineering-services-section
-      PROCESSOR_COMMIT: 'd6feba64457828cbf3cbbf70e278a0b778243e75'
+      PROCESSOR_COMMIT: '830f6205160f35a519ea36c0e9e32476133eadce'
       ACTS: ${{ inputs.issue-acts || vars.ISSUE_PROCESSOR_ACTS || '--label' }}
       MAX_ACTS: ${{ inputs.max-acts || '100' }}
       DRY_RUN: ${{ inputs.dry-run && 'true' || 'false' }}
@@ -263,3 +269,39 @@ jobs:
           fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### Issue processor: ${org ?? 'unknown'}\n\n\`\`\`json\n${text}\`\`\`\n`);
           process.stdout.write(text);
           NODE
+
+  # Event-driven continuation, not a schedule: a run whose acts changed something (a merge moves a base, a rebase
+  # starts checks, a close changes duplicates) is itself the event for the next run, which reads the new state. The
+  # chain stops at a fixed point, the first run that applies nothing. GitHub's own auto-merge lands rebased pull
+  # requests when their checks pass, which no run has to wait for.
+  continue:
+    needs: [process]
+    if: ${{ always() && !inputs.dry-run }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Read this run's public receipts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: pr-processor-*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: receipts
+      - name: Dispatch the next run when this one changed something
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GENERATION: ${{ inputs.generation || '0' }}
+          ACTS_INPUT: ${{ inputs.acts }}
+          ISSUE_ACTS_INPUT: ${{ inputs.issue-acts }}
+          MAX_ACTS_INPUT: ${{ inputs.max-acts }}
+        run: |
+          set -euo pipefail
+          applied=$(jq -s 'map(.counts.applied.applied // 0) | add // 0' receipts/*/pr-processor-public-receipt.json)
+          echo "applied acts this run: $applied (generation $GENERATION)"
+          if [ "$applied" -gt 0 ]; then
+            gh workflow run process-pull-requests.yml -R "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" \
+              -f acts="$ACTS_INPUT" -f issue-acts="$ISSUE_ACTS_INPUT" -f max-acts="${MAX_ACTS_INPUT:-100}" -f generation="$((GENERATION + 1))"
+            echo "### Continued: generation $((GENERATION + 1)) dispatched ($applied acts applied)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### Fixed point: no act applied; the chain stops" >> "$GITHUB_STEP_SUMMARY"
+          fi
