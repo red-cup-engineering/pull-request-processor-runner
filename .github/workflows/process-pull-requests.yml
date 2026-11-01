@@ -168,6 +168,9 @@ jobs:
           retention-days: 14
 
   issues:
+    # The Group App (561-group-github-services) holds no Issues permission yet; its owner grants Issues read and write
+    # in the App's settings, each organization approves it, and then repository variable ISSUE_PROCESSOR_ENABLED=true.
+    if: ${{ vars.ISSUE_PROCESSOR_ENABLED == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:

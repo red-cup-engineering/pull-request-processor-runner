@@ -25,7 +25,12 @@ organization at one cutoff, oldest first, so pull requests opened during a run
 no longer leave the whole run unplanned, and it judges coverage per
 organization. It also ships `process-issues`, which the `issues` job runs with
 its own act flags (input `issue-acts`, else repository variable
-`ISSUE_PROCESSOR_ACTS`, else `--label`) and reports as counts only. The package
+`ISSUE_PROCESSOR_ACTS`, else `--label`) and reports as counts only. The job
+runs only when repository variable `ISSUE_PROCESSOR_ENABLED` is `true`: the
+Group App `561-group-github-services` does not yet hold the Issues permission
+(run 41338224779: "The permissions requested are not granted to this
+installation"). Its owner grants Issues read and write in the App's settings
+and each organization approves the change. The package
 name and registry remain fixed, and changing the selected release requires an
 explicit workflow version change.
 
