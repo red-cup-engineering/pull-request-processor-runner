@@ -7,36 +7,36 @@
 [![Tips welcome](https://img.shields.io/badge/tips-welcome-d4a017)](https://github.com/561-group/.github/blob/main/TIPS.md)
 <!-- 561-group-standards:badges:end -->
 
-Runs the released deterministic pull request processor explicitly on demand on the
-existing five-organization matrix. The existing GitHub App supplies a separate
+Runs the deterministic pull-request and issue processors of
+[red-cup-engineering/github-engineering-services-section](https://github.com/red-cup-engineering/github-engineering-services-section)
+on GitHub-hosted runners, over the five-organization matrix, so no Group host
+does this work. The Group App `561-group-github-services` supplies a separate
 short-lived installation token for each organization. Act selection, limits,
-permissions and manual dry-run behavior are defined by
-[the workflow](.github/workflows/process-pull-requests.yml).
+permissions and dry runs are defined by [the workflow](.github/workflows/process-pull-requests.yml).
 
-See [causal-pr-processor-invocation.md](specifications/causal-pr-processor-invocation.md) for governance on clock retirement; unattended causal binding remains unreceived.
+## How it is triggered: events, not a clock
 
-## Selected processor release
+There is no schedule ([C1](specifications/causal-pr-processor-invocation.md)).
+A run starts when it is dispatched, and a run whose acts changed something
+dispatches the next one (the `continue` job). A merge moves a base, a rebase
+starts checks, and a close changes duplicates, so that change is the event for
+the next run, which reads the new state. The chain stops at a fixed point: the
+first run that applies nothing. Rebased pull requests do not wait for a run:
+GitHub's own auto-merge lands each one when its checks pass. The processor
+turns that setting on where a repository lacks it (`allow-auto-merge`).
 
-The workflow pins `@red-cup-engineering/github-repository-hosting-service` to
-`0.5.9` from the existing `https://registry.561.group/` registry. That release
-declares source commit `754fad4757b3003ab56ac627cdc88fc7cdc5c176`
-(red-cup-engineering/github-engineering-services-section#252). It reads every
-organization at one cutoff, oldest first, so pull requests opened during a run
-no longer leave the whole run unplanned, and it judges coverage per
-organization. It also ships `process-issues`, which the `issues` job runs with
-its own act flags (input `issue-acts`, else repository variable
-`ISSUE_PROCESSOR_ACTS`, else `--label`) and reports as counts only. The job
-runs only when repository variable `ISSUE_PROCESSOR_ENABLED` is `true`: the
-Group App `561-group-github-services` does not yet hold the Issues permission
-(run 41338224779: "The permissions requested are not granted to this
-installation"). Its owner grants Issues read and write in the App's settings
-and each organization approves the change. The package
-name and registry remain fixed, and changing the selected release requires an
-explicit workflow version change.
+## Selected processor source
 
-Each run records the version actually acquired and the downloaded tarball
-digest. Its completed run and receipt establish whether this selected release
-was executed; the workflow declaration alone does not establish runtime adoption.
+Both jobs fetch `scripts/` and `src/` of the GitHub section at the one commit
+named by `PROCESSOR_COMMIT` (depth 1, blobless, sparse). The processor is pure
+Node with nothing to install, so a merged fix reaches the runner by changing
+that line, without waiting for a registry release. Receipts name the source
+repository and commit that ran.
+
+The `process` job applies the act flags of input `acts`, else repository
+variable `PR_PROCESSOR_ACTS`, else `--label`. The `issues` job applies input
+`issue-acts`, else `ISSUE_PROCESSOR_ACTS`, else `--label`, and runs while
+`ISSUE_PROCESSOR_ENABLED` is `true`. Its public evidence is counts only.
 
 ## Receiving each run
 

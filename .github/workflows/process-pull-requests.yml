@@ -38,13 +38,17 @@ on:
         description: Plan only, execute nothing
         type: boolean
         default: false
+      generation:
+        description: How many runs in a row this chain has continued (set by the continue job; 0 for a fresh run)
+        type: string
+        default: '0'
 
 permissions: {}
 
 jobs:
   process:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -53,9 +57,10 @@ jobs:
       group: process-pull-requests-${{ matrix.org }}
       cancel-in-progress: false
     env:
-      PROCESSOR_PACKAGE: '@red-cup-engineering/github-repository-hosting-service'
-      PROCESSOR_VERSION: '0.5.9'
-      PROCESSOR_REGISTRY: https://registry.561.group/
+      # The processor runs from its source at one pinned commit of the GitHub section (pure Node, no dependencies), so
+      # a merged fix reaches the runner by changing this line, without waiting for a registry release.
+      PROCESSOR_SOURCE: red-cup-engineering/github-engineering-services-section
+      PROCESSOR_COMMIT: '830f6205160f35a519ea36c0e9e32476133eadce'
       ACTS: ${{ inputs.acts || vars.PR_PROCESSOR_ACTS || '--label' }}
       MAX_ACTS: ${{ inputs.max-acts || '100' }}
       DRY_RUN: ${{ inputs.dry-run && 'true' || 'false' }}
@@ -67,27 +72,38 @@ jobs:
           app-id: ${{ vars.PR_PROCESSOR_APP_ID }}
           private-key: ${{ secrets.PR_PROCESSOR_APP_KEY }}
           owner: ${{ matrix.org }}
+          # contents write: the rebase act pushes a rebased head (leased on the classified commit) and merge lands it.
           permission-pull-requests: write
-          permission-contents: read
+          permission-contents: write
           permission-statuses: read
+          permission-checks: read
+          permission-administration: write
+      - name: Mint a read token for the processor's source
+        id: source
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.PR_PROCESSOR_APP_ID }}
+          private-key: ${{ secrets.PR_PROCESSOR_APP_KEY }}
+          owner: red-cup-engineering
+          repositories: github-engineering-services-section
+          permission-contents: read
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
         with:
           node-version: '24'
-      - name: Fetch the released processor (no dependencies to install)
+      - name: Fetch the processor's source at the pinned commit (scripts and src only, no history)
+        env:
+          SOURCE_TOKEN: ${{ steps.source.outputs.token }}
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP"
-          tarball="$(npm pack "$PROCESSOR_PACKAGE@$PROCESSOR_VERSION" --registry "$PROCESSOR_REGISTRY" --silent --ignore-scripts)"
-          mkdir processor && tar -xzf "$tarball" -C processor
-          node - "$tarball" <<'NODE'
-          const fs = require('node:fs'), crypto = require('node:crypto');
-          const pkg = JSON.parse(fs.readFileSync('./processor/package/package.json', 'utf8'));
-          const version = typeof pkg.version === 'string' && /^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(pkg.version) ? pkg.version : null;
-          const source = { name: process.env.PROCESSOR_PACKAGE, version,
-            tarballSha256: crypto.createHash('sha256').update(fs.readFileSync(process.argv[2])).digest('hex') };
-          fs.writeFileSync('processor-source.json', JSON.stringify(source) + '\n');
-          console.log('processor', version);
-          NODE
+          git init -q processor && cd processor
+          git -c http.extraheader="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$SOURCE_TOKEN" | base64 -w0)" \
+            fetch -q --depth=1 --filter=blob:none "https://github.com/$PROCESSOR_SOURCE.git" "$PROCESSOR_COMMIT"
+          git sparse-checkout set --no-cone /scripts/ /src/
+          git -c http.extraheader="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$SOURCE_TOKEN" | base64 -w0)" checkout -q FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$PROCESSOR_COMMIT"
+          printf '{"name":"%s","version":null,"commit":"%s"}\n' "$PROCESSOR_SOURCE" "$PROCESSOR_COMMIT" > "$RUNNER_TEMP/processor-source.json"
+          echo "processor $PROCESSOR_SOURCE@$PROCESSOR_COMMIT"
       - name: Process ${{ matrix.org }} pull requests
         id: process
         env:
@@ -99,7 +115,7 @@ jobs:
           if [ "$DRY_RUN" = "true" ]; then mode=""; else mode="--apply $ACTS --max-acts $MAX_ACTS"; fi
           status=0
           # shellcheck disable=SC2086
-          node "$RUNNER_TEMP/processor/package/scripts/process-pull-requests.mjs" --org "$ORG" $mode --plan-out "$plan" > "$RUNNER_TEMP/processor-private-output.log" 2>&1 || status=$?
+          node "$RUNNER_TEMP/processor/scripts/process-pull-requests.mjs" --org "$ORG" $mode --plan-out "$plan" > "$RUNNER_TEMP/processor-private-output.log" 2>&1 || status=$?
           printf '%s\n' "$status" > "$RUNNER_TEMP/processor-exit-code"
           exit "$status"
       - name: Receive public run evidence without private Work contents
@@ -125,7 +141,7 @@ jobs:
           const p = recognized ? observed.value : null;
           const owners = Array.isArray(p?.coverage?.owners) ? p.coverage.owners : [];
           const reasons = new Set(['partial-graphql-page', 'provider-read-failed', 'malformed-search-page', 'malformed-graphql-errors',
-            'issue-count-changed', 'search-result-limit', 'page-budget-insufficient', 'malformed-pull', 'pull-outside-selected-scope',
+            'issue-count-changed', 'search-result-limit', 'page-budget-insufficient', 'anchor-stuck', 'malformed-pull', 'pull-outside-selected-scope',
             'duplicate-pull', 'missing-next-cursor', 'cursor-cycle', 'page-limit', 'page-size-exceeded', 'issue-count-mismatch']);
           const reasonCounts = list => { const out = {}; for (const reason of list) {
             const code = reasons.has(reason?.code) ? reason.code : 'unrecognized'; out[code] = (out[code] ?? 0) + 1;
@@ -140,7 +156,7 @@ jobs:
           const receipt = { kind: 'github.pull-request-run-receipt.v1', visibility: 'public-aggregate', generatedAt: new Date().toISOString(),
             runner: { repository, runId, attempt, headSha: match(process.env.GITHUB_SHA, /^[0-9a-f]{40}$/i), organization: org,
               runUrl: runId ? `https://github.com/${repository}/actions/runs/${runId}` : null },
-            processor: { name: '@red-cup-engineering/github-repository-hosting-service',
+            processor: { name: match(source?.name, /^[a-z0-9-]+\/[a-z0-9_.-]+$/i), commit: match(source?.commit, /^[0-9a-f]{40}$/i),
               version: match(source?.version, /^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/),
               tarballSha256: match(source?.tarballSha256, /^[0-9a-f]{64}$/i), node: process.version },
             execution: { outcome, exitCode, dryRun: process.env.DRY_RUN === 'true',
@@ -150,7 +166,7 @@ jobs:
               reasons: reasonCounts(owners.flatMap(owner => Array.isArray(owner?.reasons) ? owner.reasons : [])),
               attemptReasons: reasonCounts(attempts.flatMap(item => Array.isArray(item?.reasons) ? item.reasons : [])) },
             counts: { open: integer(p?.summary?.open), observedPulls: integer(p?.observedPulls), requests: integer(p?.requests),
-              byDisposition: counts(p?.summary?.byDisposition, ['superseded', 'dependabot', 'conflicting', 'checks-failing', 'unknown', 'draft-unverified', 'draft-clean', 'no-checks', 'checks-pending', 'ready-clean']),
+              byDisposition: counts(p?.summary?.byDisposition, ['superseded', 'dependabot', 'conflicting', 'checks-failing', 'failing-on-base-too', 'unknown', 'draft-unverified', 'draft-clean', 'no-checks', 'checks-pending', 'ready-clean']),
               applied: counts(p?.summary?.appliedByStatus, ['applied', 'skipped', 'refused', 'deferred', 'error']) } };
           const text = JSON.stringify(receipt, null, 2) + '\n';
           fs.writeFileSync(file('pr-processor-public-receipt.json'), text);
@@ -168,8 +184,8 @@ jobs:
           retention-days: 14
 
   issues:
-    # The Group App (561-group-github-services) holds no Issues permission yet; its owner grants Issues read and write
-    # in the App's settings, each organization approves it, and then repository variable ISSUE_PROCESSOR_ENABLED=true.
+    # Runs when repository variable ISSUE_PROCESSOR_ENABLED is true (the Group App holds Issues read and write since
+    # 2026-11-01 in all five organizations).
     if: ${{ vars.ISSUE_PROCESSOR_ENABLED == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -181,9 +197,8 @@ jobs:
       group: process-issues-${{ matrix.org }}
       cancel-in-progress: false
     env:
-      PROCESSOR_PACKAGE: '@red-cup-engineering/github-repository-hosting-service'
-      PROCESSOR_VERSION: '0.5.9'
-      PROCESSOR_REGISTRY: https://registry.561.group/
+      PROCESSOR_SOURCE: red-cup-engineering/github-engineering-services-section
+      PROCESSOR_COMMIT: '830f6205160f35a519ea36c0e9e32476133eadce'
       ACTS: ${{ inputs.issue-acts || vars.ISSUE_PROCESSOR_ACTS || '--label' }}
       MAX_ACTS: ${{ inputs.max-acts || '100' }}
       DRY_RUN: ${{ inputs.dry-run && 'true' || 'false' }}
@@ -200,13 +215,28 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
         with:
           node-version: '24'
-      - name: Fetch the released processor (no dependencies to install)
+      - name: Mint a read token for the processor's source
+        id: source
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.PR_PROCESSOR_APP_ID }}
+          private-key: ${{ secrets.PR_PROCESSOR_APP_KEY }}
+          owner: red-cup-engineering
+          repositories: github-engineering-services-section
+          permission-contents: read
+      - name: Fetch the processor's source at the pinned commit (scripts and src only, no history)
+        env:
+          SOURCE_TOKEN: ${{ steps.source.outputs.token }}
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP"
-          tarball="$(npm pack "$PROCESSOR_PACKAGE@$PROCESSOR_VERSION" --registry "$PROCESSOR_REGISTRY" --silent --ignore-scripts)"
-          mkdir processor && tar -xzf "$tarball" -C processor
-          echo "processor $PROCESSOR_VERSION sha256 $(sha256sum "$tarball" | cut -d' ' -f1)"
+          git init -q processor && cd processor
+          header="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$SOURCE_TOKEN" | base64 -w0)"
+          git -c http.extraheader="$header" fetch -q --depth=1 --filter=blob:none "https://github.com/$PROCESSOR_SOURCE.git" "$PROCESSOR_COMMIT"
+          git sparse-checkout set --no-cone /scripts/ /src/
+          git -c http.extraheader="$header" checkout -q FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$PROCESSOR_COMMIT"
+          echo "processor $PROCESSOR_SOURCE@$PROCESSOR_COMMIT"
       - name: Process ${{ matrix.org }} issues
         env:
           GITHUB_TOKEN: ${{ steps.app.outputs.token }}
@@ -216,7 +246,7 @@ jobs:
           plan="$RUNNER_TEMP/issue-plan.json"
           if [ "$DRY_RUN" = "true" ]; then mode=""; else mode="--apply $ACTS --max-acts $MAX_ACTS"; fi
           # shellcheck disable=SC2086
-          node "$RUNNER_TEMP/processor/package/scripts/process-issues.mjs" --org "$ORG" $mode --plan-out "$plan" > "$RUNNER_TEMP/issue-processor-private-output.log" 2>&1
+          node "$RUNNER_TEMP/processor/scripts/process-issues.mjs" --org "$ORG" $mode --plan-out "$plan" > "$RUNNER_TEMP/issue-processor-private-output.log" 2>&1
       - name: Publish counts only
         if: ${{ always() }}
         env:
@@ -239,3 +269,39 @@ jobs:
           fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### Issue processor: ${org ?? 'unknown'}\n\n\`\`\`json\n${text}\`\`\`\n`);
           process.stdout.write(text);
           NODE
+
+  # Event-driven continuation, not a schedule: a run whose acts changed something (a merge moves a base, a rebase
+  # starts checks, a close changes duplicates) is itself the event for the next run, which reads the new state. The
+  # chain stops at a fixed point, the first run that applies nothing. GitHub's own auto-merge lands rebased pull
+  # requests when their checks pass, which no run has to wait for.
+  continue:
+    needs: [process]
+    if: ${{ always() && !inputs.dry-run }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Read this run's public receipts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: pr-processor-*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: receipts
+      - name: Dispatch the next run when this one changed something
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GENERATION: ${{ inputs.generation || '0' }}
+          ACTS_INPUT: ${{ inputs.acts }}
+          ISSUE_ACTS_INPUT: ${{ inputs.issue-acts }}
+          MAX_ACTS_INPUT: ${{ inputs.max-acts }}
+        run: |
+          set -euo pipefail
+          applied=$(jq -s 'map(.counts.applied.applied // 0) | add // 0' receipts/*/pr-processor-public-receipt.json)
+          echo "applied acts this run: $applied (generation $GENERATION)"
+          if [ "$applied" -gt 0 ]; then
+            gh workflow run process-pull-requests.yml -R "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" \
+              -f acts="$ACTS_INPUT" -f issue-acts="$ISSUE_ACTS_INPUT" -f max-acts="${MAX_ACTS_INPUT:-100}" -f generation="$((GENERATION + 1))"
+            echo "### Continued: generation $((GENERATION + 1)) dispatched ($applied acts applied)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### Fixed point: no act applied; the chain stops" >> "$GITHUB_STEP_SUMMARY"
+          fi
