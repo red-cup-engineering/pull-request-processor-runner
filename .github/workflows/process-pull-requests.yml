@@ -42,6 +42,10 @@ on:
         description: How many runs in a row this chain has continued (set by the continue job; 0 for a fresh run)
         type: string
         default: '0'
+      repository:
+        description: Process only this owner/name (set by a CI host when a pull request's job completes); blank = every organization
+        type: string
+        default: ''
 
 permissions: {}
 
@@ -109,13 +113,21 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ steps.app.outputs.token }}
           ORG: ${{ matrix.org }}
+          REPOSITORY: ${{ inputs.repository }}
         run: |
           set -euo pipefail
           plan="$RUNNER_TEMP/plan.json"
+          # A run for one repository (a CI host's job-completed event) processes only that repository, in its own organization's job.
+          selector=(--org "$ORG")
+          if [ -n "$REPOSITORY" ]; then
+            [[ "$REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "invalid repository input"; exit 2; }
+            if [ "${REPOSITORY%%/*}" != "$ORG" ]; then printf '0\n' > "$RUNNER_TEMP/processor-exit-code"; echo "not this organization"; exit 0; fi
+            selector=(--repo "$REPOSITORY")
+          fi
           if [ "$DRY_RUN" = "true" ]; then mode=""; else mode="--apply $ACTS --max-acts $MAX_ACTS"; fi
           status=0
           # shellcheck disable=SC2086
-          node "$RUNNER_TEMP/processor/scripts/process-pull-requests.mjs" --org "$ORG" $mode --plan-out "$plan" > "$RUNNER_TEMP/processor-private-output.log" 2>&1 || status=$?
+          node "$RUNNER_TEMP/processor/scripts/process-pull-requests.mjs" "${selector[@]}" $mode --plan-out "$plan" > "$RUNNER_TEMP/processor-private-output.log" 2>&1 || status=$?
           printf '%s\n' "$status" > "$RUNNER_TEMP/processor-exit-code"
           exit "$status"
       - name: Receive public run evidence without private Work contents
@@ -186,7 +198,7 @@ jobs:
   issues:
     # Runs when repository variable ISSUE_PROCESSOR_ENABLED is true (the Group App holds Issues read and write since
     # 2026-11-01 in all five organizations).
-    if: ${{ vars.ISSUE_PROCESSOR_ENABLED == 'true' }}
+    if: ${{ vars.ISSUE_PROCESSOR_ENABLED == 'true' && !inputs.repository }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -294,13 +306,15 @@ jobs:
           ACTS_INPUT: ${{ inputs.acts }}
           ISSUE_ACTS_INPUT: ${{ inputs.issue-acts }}
           MAX_ACTS_INPUT: ${{ inputs.max-acts }}
+          REPOSITORY_INPUT: ${{ inputs.repository }}
         run: |
           set -euo pipefail
           applied=$(jq -s 'map(.counts.applied.applied // 0) | add // 0' receipts/*/pr-processor-public-receipt.json)
           echo "applied acts this run: $applied (generation $GENERATION)"
           if [ "$applied" -gt 0 ]; then
             gh workflow run process-pull-requests.yml -R "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" \
-              -f acts="$ACTS_INPUT" -f issue-acts="$ISSUE_ACTS_INPUT" -f max-acts="${MAX_ACTS_INPUT:-100}" -f generation="$((GENERATION + 1))"
+              -f acts="$ACTS_INPUT" -f issue-acts="$ISSUE_ACTS_INPUT" -f max-acts="${MAX_ACTS_INPUT:-100}" -f generation="$((GENERATION + 1))" \
+              -f repository="$REPOSITORY_INPUT"
             echo "### Continued: generation $((GENERATION + 1)) dispatched ($applied acts applied)" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "### Fixed point: no act applied; the chain stops" >> "$GITHUB_STEP_SUMMARY"
