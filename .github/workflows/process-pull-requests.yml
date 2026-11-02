@@ -184,14 +184,21 @@ jobs:
               problems: (() => {
                 const kinds = [['http-403', /\b403\b|forbidden|not accessible/i], ['http-404', /\b404\b|not found/i], ['http-405', /\b405\b|not allowed/i],
                   ['http-409', /\b409\b|conflict/i], ['http-422', /\b422\b|validation failed|unprocessable/i], ['rate-limit', /rate limit|secondary/i],
-                  ['timeout', /timed? ?out|timeout|abort/i], ['git-fetch', /git fetch failed/i], ['git-push', /push refused|git push/i],
-                  ['git-merge-tree', /merge-tree/i], ['git', /\bgit /i], ['head-moved', /head-moved/], ['no-longer-open', /no-longer-open/],
-                  ['not-mergeable', /not (?:clean|mergeable) now/], ['fork-head', /another repository/]];
+                  ['timeout', /timed? ?out|timeout|abort/i],
+                  ['git-auth', /could not read Username|Authentication failed|terminal prompts disabled|\b401\b/i],
+                  ['git-missing-object', /not our ref|did not send all necessary objects|promisor|bad object|unable to read|missing object/i],
+                  ['git-fetch', /git fetch failed/i], ['git-push', /push refused|git push/i],
+                  ['git-merge-tree', /merge-tree/i], ['head-moved', /head-moved/], ['no-longer-open', /no-longer-open/],
+                  ['not-mergeable', /not (?:clean|mergeable) now/], ['fork-head', /another repository/],
+                  ['program-error', /is not a function|cannot read propert|is not defined|undefined/i]];
+                // Any other Git failure is named by its subcommand (fixed words only), e.g. git-cherry, git-commit-tree.
+                const kindOf = (detail) => kinds.find(([, pattern]) => pattern.test(detail))?.[0]
+                  ?? ((/\bgit ([a-z][a-z-]{1,30}) failed/.exec(detail) ?? [])[1] ? `git-${/\bgit ([a-z][a-z-]{1,30}) failed/.exec(detail)[1]}` : /\bgit /i.test(detail) ? 'git' : 'other');
                 const classes = new Set(['label', 'comment', 'update-branch', 'rebase', 'close-superseded', 'allow-auto-merge', 'auto-merge', 'merge']);
                 const out = {};
                 for (const item of Array.isArray(p?.items) ? p.items : []) for (const act of Array.isArray(item?.acts) ? item.acts : []) {
                   if (!['error', 'refused'].includes(act?.status) || !classes.has(act?.class)) continue;
-                  const kind = kinds.find(([, pattern]) => pattern.test(String(act.detail ?? '')))?.[0] ?? 'other';
+                  const kind = kindOf(String(act.detail ?? ''));
                   const key = `${act.class}:${act.status}:${kind}`; out[key] = (out[key] ?? 0) + 1;
                 }
                 return out;
